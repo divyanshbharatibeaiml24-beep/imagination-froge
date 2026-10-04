@@ -47,9 +47,16 @@ app.add_middleware(
 )
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# VAULT DIRECTORIES
+# VAULT DIRECTORIES & PATH SETUP
 # ═══════════════════════════════════════════════════════════════════════════════
-VAULT = os.path.abspath("dicom_vault")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# On Vercel or other serverless runtimes the root directory is read-only; use /tmp for vault storage
+if os.environ.get("VERCEL") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME"):
+    VAULT = os.path.join("/tmp", "dicom_vault")
+else:
+    VAULT = os.path.join(BASE_DIR, "dicom_vault")
+
 RAW = os.path.join(VAULT, "raw")
 SANDBOX = os.path.join(VAULT, "sandboxed")
 CERTIFIED = os.path.join(VAULT, "certified")
@@ -256,12 +263,12 @@ def create_dicom_file(path, patient_name, patient_id, study_uid, series_uid,
 
     # Load authentic clinical medical imaging scan asset
     asset_map = {
-        "CT": os.path.join("assets", "scans", "ct_head.jpg"),
-        "DX": os.path.join("assets", "scans", "chest_xray.jpg"),
-        "MR": os.path.join("assets", "scans", "spine_mr.jpg"),
-        "US": os.path.join("assets", "scans", "carotid_us.jpg"),
+        "CT": os.path.join(BASE_DIR, "assets", "scans", "ct_head.jpg"),
+        "DX": os.path.join(BASE_DIR, "assets", "scans", "chest_xray.jpg"),
+        "MR": os.path.join(BASE_DIR, "assets", "scans", "spine_mr.jpg"),
+        "US": os.path.join(BASE_DIR, "assets", "scans", "carotid_us.jpg"),
     }
-    asset_path = asset_map.get(modality, os.path.join("assets", "scans", "ct_head.jpg"))
+    asset_path = asset_map.get(modality, os.path.join(BASE_DIR, "assets", "scans", "ct_head.jpg"))
     if os.path.exists(asset_path):
         img = Image.open(asset_path).convert("L").resize((512, 512), Image.Resampling.LANCZOS)
     else:
@@ -1367,7 +1374,8 @@ def get_policy(policy_id: str):
 # ═══════════════════════════════════════════════════════════════════════════════
 # STATIC FILES & STARTUP
 # ═══════════════════════════════════════════════════════════════════════════════
-app.mount("/", StaticFiles(directory=".", html=True), name="static")
+if os.path.exists(os.path.join(BASE_DIR, "index.html")) and not os.environ.get("VERCEL"):
+    app.mount("/", StaticFiles(directory=BASE_DIR, html=True), name="static")
 
 if __name__ == "__main__":
     import uvicorn
