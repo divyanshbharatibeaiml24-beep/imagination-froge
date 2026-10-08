@@ -39,7 +39,11 @@ if %ERRORLEVEL% EQU 0 (
     echo [OK] All dependencies successfully installed!
 )
 
-:: 3. Display application link
+:: 3. Start automatic GitHub source sync in the background
+echo [2/4] Starting automatic GitHub sync...
+start "" /b powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\auto-push.ps1" -ProjectRoot "%~dp0"
+
+:: 4. Display application link
 echo.
 echo ======================================================================
 echo   BACKEND AND COMMAND CENTER READY
@@ -49,12 +53,12 @@ echo   Swagger API:    http://localhost:8000/docs
 echo ======================================================================
 echo.
 
-:: 4. Launch web browser in background after 2 seconds
-echo [2/3] Preparing to open web browser...
+:: 5. Launch web browser in background after 2 seconds
+echo [3/4] Preparing to open web browser...
 start "" /b cmd /c "timeout /t 2 /nobreak >nul && start http://localhost:8000/index.html"
 
-:: 5. Start the backend server
-echo [3/3] Starting VeilGuard backend engine on port 8000...
+:: 6. Start the backend server
+echo [4/4] Starting VeilGuard backend engine on port 8000...
 echo (Press CTRL + C at any time to shutdown the server)
 echo.
 python "%~dp0backend.py"

@@ -1,0 +1,5 @@
+__pycache__/
+*.py[cod]
+dicom_vault/raw/UP-*.dcm
+dicom_vault/sandboxed/UP-*_candidate.dcm
+dicom_vault/certified/

@@ -863,6 +863,7 @@ def run_attack_probes(candidate_path: str):
 # STUDY DATABASE & SEEDING
 # ═══════════════════════════════════════════════════════════════════════════════
 STUDIES: Dict[str, dict] = {}
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 
 STUDY_DEFS = [
     {"id": "ST-90214-CRANIAL-CT", "pn": "DOE^JOHN", "pid": "MRN-882194", "mod": "CT",
@@ -879,6 +880,72 @@ STUDY_DEFS = [
      "sc": 3, "ic": 24, "burn": "CHEN, WEI DOB: 1982-04-19 MRN#672100", "inst": "JOHNS HOPKINS RADIOLOGY"},
 ]
 
+
+def ingest_uploaded_dicom(content: bytes, original_name: str) -> dict:
+    """Validate and register one user-supplied DICOM without modifying the source."""
+    if not content:
+        raise HTTPException(400, "The uploaded file is empty")
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, "DICOM file exceeds the 50 MB upload limit")
+
+    try:
+        ds = pydicom.dcmread(io.BytesIO(content))
+        if not hasattr(ds, "PixelData") or not getattr(ds, "Rows", None) or not getattr(ds, "Columns", None):
+            raise ValueError("DICOM has no renderable pixel data")
+        ds.pixel_array  # Verify the installed codecs can decode this transfer syntax.
+    except Exception as exc:
+        raise HTTPException(422, f"Invalid or unsupported DICOM file: {exc}") from exc
+
+    study_id = f"UP-{uuid.uuid4().hex[:10].upper()}"
+    raw_path = os.path.join(RAW, f"{study_id}.dcm")
+    sandbox_path = os.path.join(SANDBOX, f"{study_id}_candidate.dcm")
+    with open(raw_path, "wb") as handle:
+        handle.write(content)
+
+    findings = discover_phi(ds)
+    review_items = [finding for finding in findings if finding["status"] == "Pending Review"]
+    patient_name = str(getattr(ds, "PatientName", "UNKNOWN"))
+    patient_id = str(getattr(ds, "PatientID", "UNKNOWN"))
+    suffix = study_id[-6:]
+    record = {
+        "id": study_id,
+        "sourceName": os.path.basename((original_name or "uploaded-study.dcm").replace("\\", "/")),
+        "patientName": patient_name,
+        "anonPatientName": f"ANONYMIZED^PATIENT^{suffix}",
+        "patientId": patient_id,
+        "anonPatientId": f"VG-2026-{suffix}",
+        "modality": str(getattr(ds, "Modality", "OT")),
+        "studyDesc": str(getattr(ds, "StudyDescription", "Uploaded DICOM study")),
+        "seriesDesc": str(getattr(ds, "SeriesDescription", "User supplied series")),
+        "seriesCount": 1,
+        "instanceCount": int(getattr(ds, "NumberOfFrames", 1) or 1),
+        "scanStatus": "Ready",
+        "riskStatus": "Critical PHI" if findings else "No PHI detected",
+        "releaseState": "QUARANTINE",
+        "findings": findings,
+        "findingsCount": len(findings),
+        "pixelFindingsCount": sum(1 for finding in findings if "Pixel" in finding["type"] or "Visual" in finding["type"]),
+        "reviewPendingCount": len(review_items),
+        "reviewItems": [{
+            "id": finding["id"], "title": finding["evidence"][:50],
+            "category": finding["type"], "coords": finding["loc"],
+            "text": finding["evidence"], "clinical": "Requires analyst review",
+            "status": "pending",
+        } for finding in review_items],
+        "validationStatus": "PENDING",
+        "attackFindingsCount": 0,
+        "rawFilePath": raw_path,
+        "sandboxedFilePath": sandbox_path,
+        "transformManifest": [],
+        "validationResult": None,
+        "attackResult": None,
+        "hashes": {"input": sha256_bytes(content), "output": "", "merkle": ""},
+        "truths": {"privacy": "PENDING", "pixel": "PENDING", "structural": "PENDING"},
+    }
+    STUDIES[study_id] = record
+    AUDIT.append(study_id, "INGEST", f"User upload accepted; {len(findings)} findings")
+    return record
+
 def seed_studies():
     for sd in STUDY_DEFS:
         study_uid = generate_uid()
@@ -887,10 +954,14 @@ def seed_studies():
         raw_path = os.path.join(RAW, f"{sd['id']}.dcm")
         sandbox_path = os.path.join(SANDBOX, f"{sd['id']}_candidate.dcm")
 
-        input_hash = create_dicom_file(
-            raw_path, sd["pn"], sd["pid"], study_uid, series_uid, sop_uid,
-            sd["mod"], sd["sd"], sd["srd"], sd["burn"], institution=sd["inst"],
-        )
+        if os.path.exists(raw_path):
+            with open(raw_path, "rb") as handle:
+                input_hash = sha256_bytes(handle.read())
+        else:
+            input_hash = create_dicom_file(
+                raw_path, sd["pn"], sd["pid"], study_uid, series_uid, sop_uid,
+                sd["mod"], sd["sd"], sd["srd"], sd["burn"], institution=sd["inst"],
+            )
 
         # Run discovery on the file
         ds = pydicom.dcmread(raw_path)
@@ -985,6 +1056,19 @@ def list_studies():
         c = {k: v for k, v in s.items() if k not in ("rawFilePath", "sandboxedFilePath")}
         safe.append(c)
     return safe
+
+
+@app.post("/api/studies/upload", status_code=201)
+async def upload_study(file: UploadFile = File(...)):
+    content = await file.read(MAX_UPLOAD_BYTES + 1)
+    record = ingest_uploaded_dicom(content, file.filename or "uploaded-study.dcm")
+    return {
+        "status": "INGESTED",
+        "studyId": record["id"],
+        "sourceName": record["sourceName"],
+        "modality": record["modality"],
+        "findingsCount": record["findingsCount"],
+    }
 
 
 @app.get("/api/studies/{study_id}")

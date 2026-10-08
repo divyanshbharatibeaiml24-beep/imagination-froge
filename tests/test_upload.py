@@ -1,0 +1,55 @@
+import os
+import unittest
+
+from fastapi.testclient import TestClient
+
+import backend
+
+
+class UploadWorkflowTest(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(backend.app)
+        self.created_paths = []
+
+    def tearDown(self):
+        for path in self.created_paths:
+            if os.path.exists(path):
+                os.remove(path)
+
+    def test_upload_rejects_non_dicom_data(self):
+        response = self.client.post(
+            "/api/studies/upload",
+            files={"file": ("not-a-scan.dcm", b"not a dicom", "application/dicom")},
+        )
+        self.assertEqual(response.status_code, 422)
+
+    def test_upload_can_complete_pipeline(self):
+        source = backend.STUDIES["ST-44821-CHEST-DX"]["rawFilePath"]
+        with open(source, "rb") as handle:
+            response = self.client.post(
+                "/api/studies/upload",
+                files={"file": ("user-scan.dcm", handle, "application/dicom")},
+            )
+        self.assertEqual(response.status_code, 201)
+        study_id = response.json()["studyId"]
+        record = backend.STUDIES[study_id]
+        self.created_paths.extend([record["rawFilePath"], record["sandboxedFilePath"]])
+
+        for action in ("discover", "transform"):
+            self.assertEqual(self.client.post(f"/api/studies/{study_id}/{action}").status_code, 200)
+        self.client.post(
+            f"/api/studies/{study_id}/review/action",
+            json={"bulk": True, "action": "approve"},
+        )
+        for action in ("validate", "attack"):
+            self.assertEqual(self.client.post(f"/api/studies/{study_id}/{action}").status_code, 200)
+
+        study = self.client.get(f"/api/studies/{study_id}").json()
+        image = self.client.get(f"/api/studies/{study_id}/slice?mode=validated")
+        self.assertEqual(study["validationStatus"], "3 / 3 PASS")
+        self.assertTrue(study["hashes"]["output"])
+        self.assertEqual(image.headers["content-type"], "image/png")
+
+
+if __name__ == "__main__":
+    unittest.main()
