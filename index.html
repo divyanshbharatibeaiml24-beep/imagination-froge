@@ -102,6 +102,14 @@
             <p class="field-help">Demo data is synthetic and contains representative identifiers for testing.</p>
           </div>
 
+          <div class="workflow-options">
+            <div>
+              <label for="policySelect">De-identification policy</label>
+              <div class="select-wrap"><select id="policySelect"><option>Loading policies…</option></select><svg viewBox="0 0 24 24"><path d="m7 9 5 5 5-5"/></svg></div>
+            </div>
+            <div class="control-note"><strong>Automated review</strong><span>Reviewable findings are approved by the demo pipeline before final validation.</span></div>
+          </div>
+
           <div class="run-row">
             <div class="selection-summary"><span class="summary-dot"></span><span id="selectionSummary">Select a DICOM file to continue</span></div>
             <button class="primary-button" id="runButton" type="button" disabled>
@@ -109,6 +117,11 @@
               <svg viewBox="0 0 24 24"><path d="M5 12h14m-5-5 5 5-5 5"/></svg>
             </button>
           </div>
+        </section>
+
+        <section class="worklist-card" aria-labelledby="worklistTitle">
+          <div class="worklist-heading"><div><h3 id="worklistTitle">Study worklist</h3><p>Recent inputs available in this session</p></div><span id="worklistCount" class="count-badge">0 studies</span></div>
+          <div id="worklist" class="worklist" aria-live="polite"></div>
         </section>
 
         <section id="progressCard" class="progress-card hidden" aria-live="polite">
@@ -126,6 +139,11 @@
           </div>
 
           <div class="metrics" id="metrics"></div>
+
+          <div class="viewer-toolbar">
+            <div class="view-modes" role="group" aria-label="Original image view"><button class="active" type="button" data-view="original">Original image</button><button type="button" data-view="detection">PHI overlay</button></div>
+            <label class="slice-control" for="sliceRange">Slice <input id="sliceRange" type="range" min="1" max="1" value="1"><span id="sliceValue">1 / 1</span></label>
+          </div>
 
           <div class="viewer-grid">
             <article class="viewer-card">
@@ -160,7 +178,9 @@
               <div class="download-actions">
                 <a id="downloadDicom" class="primary-button" href="#" download>Download DICOM</a>
                 <a id="downloadPackage" class="secondary-button" href="#" download>Certificate package</a>
+                <button id="downloadCertificate" class="secondary-button" type="button">Download audit certificate</button>
               </div>
+              <div class="audit-summary"><div><strong>Latest audit events</strong><span id="auditHead">—</span></div><ol id="auditList"></ol></div>
             </aside>
           </div>
         </section>

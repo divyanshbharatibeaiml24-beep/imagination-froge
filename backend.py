@@ -933,6 +933,7 @@ def ingest_uploaded_dicom(content: bytes, original_name: str) -> dict:
             "status": "pending",
         } for finding in review_items],
         "validationStatus": "PENDING",
+        "policyId": ACTIVE_POLICY_ID,
         "attackFindingsCount": 0,
         "rawFilePath": raw_path,
         "sandboxedFilePath": sandbox_path,
@@ -994,6 +995,7 @@ def seed_studies():
                 "status": "pending",
             } for f in review_items],
             "validationStatus": "3 / 3 PASS" if len(review_items) == 0 else f"{3 - (1 if len(review_items) > 0 else 0)} / 3 PASS",
+            "policyId": ACTIVE_POLICY_ID,
             "attackFindingsCount": 0,
             "rawFilePath": raw_path,
             "sandboxedFilePath": sandbox_path,
@@ -1112,11 +1114,15 @@ def run_discovery(study_id: str):
 # ─── TRANSFORMATION ──────────────────────────────────────────────────────────
 
 @app.post("/api/studies/{study_id}/transform")
-def run_transform(study_id: str):
+def run_transform(study_id: str, payload: Optional[dict] = Body(None)):
     if study_id not in STUDIES:
         raise HTTPException(404, "Study not found")
     s = STUDIES[study_id]
-    policy = POLICIES[ACTIVE_POLICY_ID]
+    policy_id = (payload or {}).get("policyId", s.get("policyId", ACTIVE_POLICY_ID))
+    if policy_id not in POLICIES:
+        raise HTTPException(400, "Unknown de-identification policy")
+    policy = POLICIES[policy_id]
+    s["policyId"] = policy_id
 
     manifest, output_hash, px_modified = transform_dicom(
         s["rawFilePath"], s["sandboxedFilePath"], s, policy
@@ -1132,6 +1138,7 @@ def run_transform(study_id: str):
         "outputHash": output_hash,
         "merkleHead": s["hashes"]["merkle"],
         "pixelsModified": px_modified,
+        "policyId": policy_id,
     }
 
 
@@ -1315,7 +1322,7 @@ def get_certificate(study_id: str):
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "studyId": study_id,
         "pseudonymId": s["anonPatientId"],
-        "policyId": ACTIVE_POLICY_ID,
+        "policyId": s.get("policyId", ACTIVE_POLICY_ID),
         "inputSHA256": s["hashes"]["input"],
         "outputSHA256": s["hashes"]["output"],
         "merkleChainHead": s["hashes"]["merkle"],
@@ -1417,7 +1424,7 @@ def run_pipeline(payload: dict = Body(...)):
     # Step 1: Discover
     run_discovery(study_id)
     # Step 2: Transform
-    transform_result = run_transform(study_id)
+    transform_result = run_transform(study_id, {"policyId": payload.get("policyId", ACTIVE_POLICY_ID)})
     # Step 3: Auto-approve reviews
     review_action(study_id, {"bulk": True, "action": "approve"})
     # Step 4: Validate

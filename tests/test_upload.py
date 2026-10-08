@@ -35,8 +35,14 @@ class UploadWorkflowTest(unittest.TestCase):
         record = backend.STUDIES[study_id]
         self.created_paths.extend([record["rawFilePath"], record["sandboxedFilePath"]])
 
-        for action in ("discover", "transform"):
-            self.assertEqual(self.client.post(f"/api/studies/{study_id}/{action}").status_code, 200)
+        self.assertEqual(self.client.post(f"/api/studies/{study_id}/discover").status_code, 200)
+        self.assertEqual(
+            self.client.post(
+                f"/api/studies/{study_id}/transform",
+                json={"policyId": "HIPAA_SAFE_HARBOR_EXT"},
+            ).status_code,
+            200,
+        )
         self.client.post(
             f"/api/studies/{study_id}/review/action",
             json={"bulk": True, "action": "approve"},
@@ -47,8 +53,11 @@ class UploadWorkflowTest(unittest.TestCase):
         study = self.client.get(f"/api/studies/{study_id}").json()
         image = self.client.get(f"/api/studies/{study_id}/slice?mode=validated")
         self.assertEqual(study["validationStatus"], "3 / 3 PASS")
+        self.assertEqual(study["policyId"], "HIPAA_SAFE_HARBOR_EXT")
         self.assertTrue(study["hashes"]["output"])
         self.assertEqual(image.headers["content-type"], "image/png")
+        certificate = self.client.get(f"/api/studies/{study_id}/certificate").json()
+        self.assertEqual(certificate["policyId"], "HIPAA_SAFE_HARBOR_EXT")
 
 
 if __name__ == "__main__":
