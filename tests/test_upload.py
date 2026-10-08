@@ -23,6 +23,17 @@ class UploadWorkflowTest(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 422)
 
+    def test_analyst_tools_return_metrics_notes_and_csv(self):
+        study_id = "ST-44821-CHEST-DX"
+        self.assertEqual(self.client.post(f"/api/studies/{study_id}/discover").status_code, 200)
+        self.assertEqual(self.client.post(f"/api/studies/{study_id}/transform").status_code, 200)
+        note = self.client.post(f"/api/studies/{study_id}/notes", json={"note": "Reviewed for release workflow."})
+        self.assertEqual(note.status_code, 201)
+        self.assertEqual(self.client.get(f"/api/studies/{study_id}/findings.csv").headers["content-type"], "text/csv; charset=utf-8")
+        metrics = self.client.get("/api/dashboard/metrics").json()
+        self.assertGreaterEqual(metrics["studies"], 4)
+        self.assertIn("STRICT_RESEARCH_V1", metrics["policyUsage"])
+
     def test_upload_can_complete_pipeline(self):
         source = backend.STUDIES["ST-44821-CHEST-DX"]["rawFilePath"]
         with open(source, "rb") as handle:

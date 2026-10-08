@@ -13,7 +13,7 @@ FastAPI server providing:
   • Real-time DICOM slice rendering as PNG with overlay modes
 """
 
-import os, io, re, time, json, copy, hashlib, hmac, uuid, math, struct
+import os, io, re, time, json, copy, hashlib, hmac, uuid, math, struct, csv
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 from collections import OrderedDict
@@ -934,6 +934,7 @@ def ingest_uploaded_dicom(content: bytes, original_name: str) -> dict:
         } for finding in review_items],
         "validationStatus": "PENDING",
         "policyId": ACTIVE_POLICY_ID,
+        "notes": [],
         "attackFindingsCount": 0,
         "rawFilePath": raw_path,
         "sandboxedFilePath": sandbox_path,
@@ -996,6 +997,7 @@ def seed_studies():
             } for f in review_items],
             "validationStatus": "3 / 3 PASS" if len(review_items) == 0 else f"{3 - (1 if len(review_items) > 0 else 0)} / 3 PASS",
             "policyId": ACTIVE_POLICY_ID,
+            "notes": [],
             "attackFindingsCount": 0,
             "rawFilePath": raw_path,
             "sandboxedFilePath": sandbox_path,
@@ -1048,6 +1050,24 @@ def health():
         "auditBlockNumber": AUDIT.block_number,
         "zeroTrustAirgap": True,
         "studiesLoaded": len(STUDIES),
+    }
+
+
+@app.get("/api/dashboard/metrics")
+def dashboard_metrics():
+    studies = list(STUDIES.values())
+    policy_usage = {}
+    for study in studies:
+        policy_id = study.get("policyId", ACTIVE_POLICY_ID)
+        policy_usage[policy_id] = policy_usage.get(policy_id, 0) + 1
+    return {
+        "studies": len(studies),
+        "approved": sum(1 for study in studies if study["releaseState"] == "APPROVE"),
+        "inReview": sum(1 for study in studies if study["reviewPendingCount"] > 0),
+        "quarantined": sum(1 for study in studies if study["releaseState"] == "QUARANTINE"),
+        "phiFindings": sum(study["findingsCount"] for study in studies),
+        "attackLeaks": sum(study["attackFindingsCount"] for study in studies),
+        "policyUsage": policy_usage,
     }
 
 
@@ -1184,6 +1204,19 @@ def review_action(study_id: str, payload: dict = Body(...)):
     return {"status": "OK", "reviewPendingCount": s["reviewPendingCount"], "releaseState": s["releaseState"]}
 
 
+@app.post("/api/studies/{study_id}/notes", status_code=201)
+def add_study_note(study_id: str, payload: dict = Body(...)):
+    if study_id not in STUDIES:
+        raise HTTPException(404, "Study not found")
+    text = str(payload.get("note", "")).strip()
+    if not text or len(text) > 1000:
+        raise HTTPException(400, "Note must contain between 1 and 1000 characters")
+    entry = {"id": uuid.uuid4().hex[:8], "text": text, "timestamp": datetime.utcnow().isoformat() + "Z"}
+    STUDIES[study_id].setdefault("notes", []).append(entry)
+    AUDIT.append(study_id, "NOTE", "Analyst note added")
+    return entry
+
+
 # ─── VALIDATION ──────────────────────────────────────────────────────────────
 
 @app.post("/api/studies/{study_id}/validate")
@@ -1307,6 +1340,21 @@ def export_study(study_id: str, format: str = Query("png")):
         return FileResponse(path, media_type="application/dicom", filename=f"{s['anonPatientId']}_CERTIFIED.dcm")
 
 
+@app.get("/api/studies/{study_id}/findings.csv")
+def export_findings_csv(study_id: str):
+    if study_id not in STUDIES:
+        raise HTTPException(404, "Study not found")
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["finding_id", "type", "source", "location", "confidence", "action", "status"])
+    for finding in STUDIES[study_id]["findings"]:
+        writer.writerow([finding["id"], finding["type"], finding["source"], finding["loc"], finding["conf"], finding["action"], finding["status"]])
+    return Response(
+        content=buffer.getvalue(), media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{study_id}_findings.csv"'},
+    )
+
+
 # ─── CERTIFICATE ─────────────────────────────────────────────────────────────
 
 @app.get("/api/studies/{study_id}/certificate")
@@ -1332,6 +1380,7 @@ def get_certificate(study_id: str):
         "validationStatus": s["validationStatus"],
         "attackLabResult": {"totalLeaks": s["attackFindingsCount"]},
         "transformManifestSize": len(s.get("transformManifest", [])),
+        "notesCount": len(s.get("notes", [])),
         "releaseGovernance": {
             "decision": s["releaseState"],
             "failClosedEnforced": True,

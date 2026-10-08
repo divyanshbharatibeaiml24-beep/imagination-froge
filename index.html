@@ -68,6 +68,8 @@
           </div>
         </section>
 
+        <section id="operationsMetrics" class="operations-metrics" aria-label="Operations overview"></section>
+
         <section class="workspace-card" aria-labelledby="inputTitle">
           <div class="card-heading">
             <div><span class="step-number">01</span><div><h3 id="inputTitle">Choose an input</h3><p>Bring your own DICOM or explore the workflow with demo data.</p></div></div>
@@ -107,7 +109,7 @@
               <label for="policySelect">De-identification policy</label>
               <div class="select-wrap"><select id="policySelect"><option>Loading policies…</option></select><svg viewBox="0 0 24 24"><path d="m7 9 5 5 5-5"/></svg></div>
             </div>
-            <div class="control-note"><strong>Automated review</strong><span>Reviewable findings are approved by the demo pipeline before final validation.</span></div>
+            <div><label for="reviewMode">Review mode</label><div class="select-wrap"><select id="reviewMode"><option value="auto">Automated review and release</option><option value="manual">Analyst review before release</option></select><svg viewBox="0 0 24 24"><path d="m7 9 5 5 5-5"/></svg></div></div>
           </div>
 
           <div class="run-row">
@@ -158,9 +160,14 @@
             </article>
           </div>
 
+          <section id="reviewPanel" class="review-panel hidden" aria-labelledby="reviewTitle">
+            <div class="panel-title"><div><h3 id="reviewTitle">Analyst review required</h3><p>Approve each reviewable finding before validation and release checks continue.</p></div><button id="approveAllButton" class="primary-button" type="button">Approve all and continue</button></div>
+            <div id="reviewQueue" class="review-queue"></div>
+          </section>
+
           <div class="result-lower">
             <section id="findingsSection" class="panel findings-panel">
-              <div class="panel-title"><div><h3>Transformation report</h3><p>Identifiers found and actions applied</p></div><span id="findingCount" class="count-badge">0 findings</span></div>
+              <div class="panel-title"><div><h3>Transformation report</h3><p>Identifiers found and actions applied</p></div><div class="inline-actions"><a id="downloadFindings" class="text-action" href="#" download>Export CSV</a><span id="findingCount" class="count-badge">0 findings</span></div></div>
               <div class="table-wrap">
                 <table>
                   <thead><tr><th>Source</th><th>Category</th><th>Action</th><th>Status</th></tr></thead>
@@ -181,6 +188,8 @@
                 <button id="downloadCertificate" class="secondary-button" type="button">Download audit certificate</button>
               </div>
               <div class="audit-summary"><div><strong>Latest audit events</strong><span id="auditHead">—</span></div><ol id="auditList"></ol></div>
+              <div class="study-metadata"><strong>Study metadata</strong><div id="metadataList"></div></div>
+              <div class="case-notes"><label for="caseNote">Analyst note</label><textarea id="caseNote" maxlength="1000" placeholder="Add an operational note for this study"></textarea><button id="saveNote" class="secondary-button" type="button">Save note</button><ul id="noteList"></ul></div>
             </aside>
           </div>
         </section>
