@@ -3,3 +3,4 @@ __pycache__/
 dicom_vault/raw/UP-*.dcm
 dicom_vault/sandboxed/UP-*_candidate.dcm
 dicom_vault/certified/
+dicom_vault/veilguard.db*

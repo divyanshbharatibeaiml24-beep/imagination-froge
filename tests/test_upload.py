@@ -33,6 +33,12 @@ class UploadWorkflowTest(unittest.TestCase):
         metrics = self.client.get("/api/dashboard/metrics").json()
         self.assertGreaterEqual(metrics["studies"], 4)
         self.assertIn("STRICT_RESEARCH_V1", metrics["policyUsage"])
+        dossier = self.client.get(f"/api/studies/{study_id}/dossier").json()
+        self.assertIn(dossier["riskBand"], {"LOW", "MODERATE", "HIGH"})
+        self.assertGreaterEqual(dossier["notesCount"], 1)
+        with backend._database() as connection:
+            persisted = connection.execute("SELECT payload_json FROM studies WHERE study_id = ?", (study_id,)).fetchone()
+        self.assertIn("Reviewed for release workflow.", persisted["payload_json"])
 
     def test_upload_can_complete_pipeline(self):
         source = backend.STUDIES["ST-44821-CHEST-DX"]["rawFilePath"]

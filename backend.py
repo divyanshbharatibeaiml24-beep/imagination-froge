@@ -13,7 +13,7 @@ FastAPI server providing:
   • Real-time DICOM slice rendering as PNG with overlay modes
 """
 
-import os, io, re, time, json, copy, hashlib, hmac, uuid, math, struct, csv
+import os, io, re, time, json, copy, hashlib, hmac, uuid, math, struct, csv, sqlite3
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 from collections import OrderedDict
@@ -63,6 +63,39 @@ CERTIFIED = os.path.join(VAULT, "certified")
 for d in [RAW, SANDBOX, CERTIFIED]:
     os.makedirs(d, exist_ok=True)
 
+DATABASE_PATH = os.path.join(VAULT, "veilguard.db")
+
+
+def _database():
+    connection = sqlite3.connect(DATABASE_PATH, timeout=5)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def initialize_database():
+    with _database() as connection:
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS studies (
+                study_id TEXT PRIMARY KEY,
+                payload_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS audit_events (
+                block_number INTEGER PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                study_id TEXT NOT NULL,
+                step TEXT NOT NULL,
+                detail TEXT NOT NULL,
+                hash TEXT NOT NULL
+            )
+        """)
+
+
+initialize_database()
+
 HMAC_SALT = b"SENTINELDICOM_VEILGUARD_MASTER_SALT_2026_FIPS140"
 DATE_SHIFT_DAYS = 106  # deterministic patient-consistent shift
 
@@ -91,9 +124,14 @@ def merkle_hash(a: str, b: str) -> str:
 # ═══════════════════════════════════════════════════════════════════════════════
 class AuditChain:
     def __init__(self):
-        self.entries: list = []
-        self.head_hash = sha256_str("GENESIS_VEILGUARD_AUDIT_CHAIN_v2")
-        self.block_number = 0
+        with _database() as connection:
+            rows = connection.execute("SELECT * FROM audit_events ORDER BY block_number").fetchall()
+        self.entries = [{
+            "block": row["block_number"], "timestamp": row["timestamp"], "studyId": row["study_id"],
+            "step": row["step"], "detail": row["detail"], "hash": row["hash"],
+        } for row in rows]
+        self.head_hash = self.entries[-1]["hash"] if self.entries else sha256_str("GENESIS_VEILGUARD_AUDIT_CHAIN_v2")
+        self.block_number = self.entries[-1]["block"] if self.entries else 0
 
     def append(self, study_id: str, step: str, detail: str):
         self.block_number += 1
@@ -109,6 +147,11 @@ class AuditChain:
             "hash": self.head_hash,
         }
         self.entries.append(entry)
+        with _database() as connection:
+            connection.execute(
+                "INSERT INTO audit_events (block_number, timestamp, study_id, step, detail, hash) VALUES (?, ?, ?, ?, ?, ?)",
+                (entry["block"], entry["timestamp"], study_id, step, detail, entry["hash"]),
+            )
         return entry
 
     def get_chain(self, study_id: str = None, last_n: int = 50):
@@ -865,6 +908,27 @@ def run_attack_probes(candidate_path: str):
 STUDIES: Dict[str, dict] = {}
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 
+
+def persist_study(study: dict):
+    payload = json.dumps(study, default=str, separators=(",", ":"))
+    with _database() as connection:
+        connection.execute(
+            "INSERT INTO studies (study_id, payload_json, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(study_id) DO UPDATE SET payload_json=excluded.payload_json, updated_at=excluded.updated_at",
+            (study["id"], payload, datetime.utcnow().isoformat() + "Z"),
+        )
+
+
+def load_persisted_studies():
+    with _database() as connection:
+        rows = connection.execute("SELECT payload_json FROM studies ORDER BY updated_at").fetchall()
+    for row in rows:
+        study = json.loads(row["payload_json"])
+        if os.path.exists(study.get("rawFilePath", "")):
+            study.setdefault("notes", [])
+            study.setdefault("policyId", ACTIVE_POLICY_ID)
+            STUDIES[study["id"]] = study
+
 STUDY_DEFS = [
     {"id": "ST-90214-CRANIAL-CT", "pn": "DOE^JOHN", "pid": "MRN-882194", "mod": "CT",
      "sd": "CT Head w/o Contrast Protocol", "srd": "Head Axial 2.5mm Brain Protocol",
@@ -946,10 +1010,13 @@ def ingest_uploaded_dicom(content: bytes, original_name: str) -> dict:
     }
     STUDIES[study_id] = record
     AUDIT.append(study_id, "INGEST", f"User upload accepted; {len(findings)} findings")
+    persist_study(record)
     return record
 
 def seed_studies():
     for sd in STUDY_DEFS:
+        if sd["id"] in STUDIES:
+            continue
         study_uid = generate_uid()
         series_uid = generate_uid()
         sop_uid = generate_uid()
@@ -1028,7 +1095,9 @@ def seed_studies():
 
         STUDIES[sd["id"]] = rec
         AUDIT.append(sd["id"], "INGEST", f"Study ingested. Input SHA-256: {input_hash[:24]}... Findings: {len(findings)}")
+        persist_study(rec)
 
+load_persisted_studies()
 seed_studies()
 
 
@@ -1045,6 +1114,7 @@ def health():
         "ocrEnsemble": {"models": ["PaddleOCR v2.8", "Spatial-CRNN"], "status": "ONLINE"},
         "validator": {"pid": os.getpid(), "status": "ONLINE", "uptime": "99.99%"},
         "vault": {"path": VAULT, "encryption": "AES-256-GCM", "status": "MOUNTED"},
+        "persistence": {"engine": "SQLite", "status": "ONLINE"},
         "activePolicy": ACTIVE_POLICY_ID,
         "auditChainHead": AUDIT.head_hash[:24] + "...",
         "auditBlockNumber": AUDIT.block_number,
@@ -1101,6 +1171,27 @@ def get_study(study_id: str):
     return {k: v for k, v in s.items() if k not in ("rawFilePath", "sandboxedFilePath")}
 
 
+@app.get("/api/studies/{study_id}/dossier")
+def get_study_dossier(study_id: str):
+    if study_id not in STUDIES:
+        raise HTTPException(404, "Study not found")
+    study = STUDIES[study_id]
+    high_impact = sum(1 for finding in study["findings"] if str(finding.get("impact", "")).startswith("High"))
+    risk_score = min(100, study["findingsCount"] * 4 + study["pixelFindingsCount"] * 9 + high_impact * 8 + study["reviewPendingCount"] * 12)
+    return {
+        "studyId": study_id,
+        "riskScore": risk_score,
+        "riskBand": "HIGH" if risk_score >= 60 else "MODERATE" if risk_score >= 30 else "LOW",
+        "lifecycle": {
+            "state": study["releaseState"], "validation": study["validationStatus"],
+            "pendingReview": study["reviewPendingCount"], "attackLeaks": study["attackFindingsCount"],
+        },
+        "policy": POLICIES.get(study.get("policyId", ACTIVE_POLICY_ID), {}),
+        "evidence": {"inputHash": study["hashes"]["input"], "outputHash": study["hashes"]["output"], "merkleHead": study["hashes"]["merkle"]},
+        "notesCount": len(study.get("notes", [])),
+    }
+
+
 # ─── DISCOVERY ────────────────────────────────────────────────────────────────
 
 @app.post("/api/studies/{study_id}/discover")
@@ -1128,6 +1219,7 @@ def run_discovery(study_id: str):
     } for f in review_items]
 
     AUDIT.append(study_id, "DISCOVER", f"Deep scan complete: {len(findings)} findings across 8 leakage planes")
+    persist_study(s)
     return {"status": "DISCOVERY_COMPLETE", "findingsCount": len(findings), "findings": findings}
 
 
@@ -1152,6 +1244,7 @@ def run_transform(study_id: str, payload: Optional[dict] = Body(None)):
     s["transformManifest"] = manifest
 
     AUDIT.append(study_id, "TRANSFORM", f"Candidate generated. {len(manifest)} tag actions applied. {px_modified} pixels masked. Output SHA-256: {output_hash[:24]}...")
+    persist_study(s)
     return {
         "status": "CANDIDATE_GENERATED",
         "manifest": manifest,
@@ -1176,6 +1269,7 @@ def review_action(study_id: str, payload: dict = Body(...)):
     if action == "quarantine":
         s["releaseState"] = "QUARANTINE"
         AUDIT.append(study_id, "REVIEW-QUARANTINE", "Analyst hard-quarantined study")
+        persist_study(s)
         return {"status": "QUARANTINED", "releaseState": "QUARANTINE"}
 
     if bulk:
@@ -1201,6 +1295,7 @@ def review_action(study_id: str, payload: dict = Body(...)):
     else:
         s["releaseState"] = "REVIEW"
 
+    persist_study(s)
     return {"status": "OK", "reviewPendingCount": s["reviewPendingCount"], "releaseState": s["releaseState"]}
 
 
@@ -1214,6 +1309,7 @@ def add_study_note(study_id: str, payload: dict = Body(...)):
     entry = {"id": uuid.uuid4().hex[:8], "text": text, "timestamp": datetime.utcnow().isoformat() + "Z"}
     STUDIES[study_id].setdefault("notes", []).append(entry)
     AUDIT.append(study_id, "NOTE", "Analyst note added")
+    persist_study(STUDIES[study_id])
     return entry
 
 
@@ -1239,6 +1335,7 @@ def run_validation(study_id: str):
     s["validationStatus"] = f"{pass_count} / 3 PASS"
 
     AUDIT.append(study_id, "VALIDATE", f"Three-Truth validation: {result['overall']}. Privacy={s['truths']['privacy']}, Pixel={s['truths']['pixel']}, Structural={s['truths']['structural']}")
+    persist_study(s)
     return {"status": "VALIDATION_COMPLETE", "overall": result["overall"], **result}
 
 
@@ -1258,6 +1355,7 @@ def run_attacks(study_id: str):
     s["attackFindingsCount"] = result["totalLeaks"]
 
     AUDIT.append(study_id, "ATTACK", f"Red team: {result['totalProbes']} probes, {result['totalLeaks']} leaks. Status: {result['overallStatus']}")
+    persist_study(s)
     return {"status": "ATTACK_COMPLETE", **result}
 
 
@@ -1271,6 +1369,7 @@ def get_attack_status(study_id: str):
             run_transform(study_id)
         s["attackResult"] = run_attack_probes(s["sandboxedFilePath"])
         s["attackFindingsCount"] = s["attackResult"]["totalLeaks"]
+        persist_study(s)
     return s["attackResult"]
 
 
@@ -1485,6 +1584,7 @@ def run_pipeline(payload: dict = Body(...)):
     s["releaseState"] = "APPROVE"
     s["validationStatus"] = "3 / 3 PASS"
     AUDIT.append(study_id, "PIPELINE-COMPLETE", f"Study fully validated and approved. Output: {s['hashes']['output'][:24]}...")
+    persist_study(s)
 
     return {
         "status": "PIPELINE_COMPLETE",

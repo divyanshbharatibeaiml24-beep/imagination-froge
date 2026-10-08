@@ -233,7 +233,7 @@ async function renderResults(study) {
   renderReviewQueue(study);
   renderMetadata(study);
   renderNotes(study.notes || []);
-  await loadAudit(study.id);
+  await Promise.all([loadAudit(study.id), loadDossier(study.id)]);
 }
 
 function renderReviewQueue(study) {
@@ -300,6 +300,19 @@ async function loadAudit(studyId) {
       ? audit.entries.slice().reverse().map((entry) => `<li>${escapeHtml(entry.step)} — ${escapeHtml(entry.detail)}</li>`).join('')
       : '<li>No recorded events.</li>';
   } catch (_) { $('auditList').innerHTML = '<li>Audit history unavailable.</li>'; }
+}
+
+async function loadDossier(studyId) {
+  try {
+    const dossier = await api(`/api/studies/${encodeURIComponent(studyId)}/dossier`);
+    $('riskScore').textContent = dossier.riskScore;
+    $('riskBand').textContent = `${dossier.riskBand} risk`;
+    $('riskDetail').textContent = `${dossier.lifecycle.pendingReview} pending review · ${dossier.notesCount} analyst note(s)`;
+  } catch (_) {
+    $('riskScore').textContent = '—';
+    $('riskBand').textContent = 'Risk unavailable';
+    $('riskDetail').textContent = 'Dossier service did not respond';
+  }
 }
 
 async function downloadCertificate() {
