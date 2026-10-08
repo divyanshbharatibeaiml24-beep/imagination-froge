@@ -907,9 +907,21 @@ def run_attack_probes(candidate_path: str):
 # ═══════════════════════════════════════════════════════════════════════════════
 STUDIES: Dict[str, dict] = {}
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+MAX_BATCH_FILES = 10
+CASE_PRIORITIES = {"LOW", "NORMAL", "HIGH", "URGENT"}
+
+
+def ensure_case_data(study: dict):
+    study.setdefault("case", {})
+    study["case"].setdefault("priority", "NORMAL")
+    study["case"].setdefault("owner", "")
+    study["case"].setdefault("tags", [])
+    study["case"].setdefault("dueDate", "")
+    study["case"].setdefault("createdAt", datetime.utcnow().isoformat() + "Z")
 
 
 def persist_study(study: dict):
+    ensure_case_data(study)
     payload = json.dumps(study, default=str, separators=(",", ":"))
     with _database() as connection:
         connection.execute(
@@ -927,6 +939,7 @@ def load_persisted_studies():
         if os.path.exists(study.get("rawFilePath", "")):
             study.setdefault("notes", [])
             study.setdefault("policyId", ACTIVE_POLICY_ID)
+            ensure_case_data(study)
             STUDIES[study["id"]] = study
 
 STUDY_DEFS = [
@@ -998,6 +1011,7 @@ def ingest_uploaded_dicom(content: bytes, original_name: str) -> dict:
         } for finding in review_items],
         "validationStatus": "PENDING",
         "policyId": ACTIVE_POLICY_ID,
+        "case": {"priority": "NORMAL", "owner": "", "tags": [], "dueDate": "", "createdAt": datetime.utcnow().isoformat() + "Z"},
         "notes": [],
         "attackFindingsCount": 0,
         "rawFilePath": raw_path,
@@ -1064,6 +1078,7 @@ def seed_studies():
             } for f in review_items],
             "validationStatus": "3 / 3 PASS" if len(review_items) == 0 else f"{3 - (1 if len(review_items) > 0 else 0)} / 3 PASS",
             "policyId": ACTIVE_POLICY_ID,
+            "case": {"priority": "NORMAL", "owner": "", "tags": ["demo"], "dueDate": "", "createdAt": datetime.utcnow().isoformat() + "Z"},
             "notes": [],
             "attackFindingsCount": 0,
             "rawFilePath": raw_path,
@@ -1137,15 +1152,25 @@ def dashboard_metrics():
         "quarantined": sum(1 for study in studies if study["releaseState"] == "QUARANTINE"),
         "phiFindings": sum(study["findingsCount"] for study in studies),
         "attackLeaks": sum(study["attackFindingsCount"] for study in studies),
+        "urgent": sum(1 for study in studies if study.get("case", {}).get("priority") == "URGENT"),
+        "assigned": sum(1 for study in studies if study.get("case", {}).get("owner")),
         "policyUsage": policy_usage,
     }
 
 
 @app.get("/api/studies")
-def list_studies():
+def list_studies(q: str = Query(""), release_state: Optional[str] = Query(None), priority: Optional[str] = Query(None)):
+    needle = q.strip().lower()
     safe = []
     for s in STUDIES.values():
         c = {k: v for k, v in s.items() if k not in ("rawFilePath", "sandboxedFilePath")}
+        haystack = " ".join([c["id"], c.get("studyDesc", ""), c.get("modality", ""), c.get("case", {}).get("owner", ""), " ".join(c.get("case", {}).get("tags", []))]).lower()
+        if needle and needle not in haystack:
+            continue
+        if release_state and c["releaseState"] != release_state:
+            continue
+        if priority and c.get("case", {}).get("priority") != priority.upper():
+            continue
         safe.append(c)
     return safe
 
@@ -1161,6 +1186,20 @@ async def upload_study(file: UploadFile = File(...)):
         "modality": record["modality"],
         "findingsCount": record["findingsCount"],
     }
+
+
+@app.post("/api/studies/batch-upload", status_code=201)
+async def upload_studies(files: List[UploadFile] = File(...)):
+    if not 1 <= len(files) <= MAX_BATCH_FILES:
+        raise HTTPException(400, f"Upload between 1 and {MAX_BATCH_FILES} DICOM files at a time")
+    accepted, rejected = [], []
+    for file in files:
+        try:
+            record = ingest_uploaded_dicom(await file.read(MAX_UPLOAD_BYTES + 1), file.filename or "uploaded-study.dcm")
+            accepted.append({"studyId": record["id"], "sourceName": record["sourceName"], "modality": record["modality"]})
+        except HTTPException as exc:
+            rejected.append({"sourceName": os.path.basename(file.filename or "uploaded-study.dcm"), "reason": exc.detail})
+    return {"status": "BATCH_INGESTED", "accepted": accepted, "rejected": rejected, "acceptedCount": len(accepted)}
 
 
 @app.get("/api/studies/{study_id}")
@@ -1190,6 +1229,81 @@ def get_study_dossier(study_id: str):
         "evidence": {"inputHash": study["hashes"]["input"], "outputHash": study["hashes"]["output"], "merkleHead": study["hashes"]["merkle"]},
         "notesCount": len(study.get("notes", [])),
     }
+
+
+@app.get("/api/studies/{study_id}/metadata")
+def get_study_metadata(study_id: str):
+    if study_id not in STUDIES:
+        raise HTTPException(404, "Study not found")
+    study = STUDIES[study_id]
+    dataset = pydicom.dcmread(study["rawFilePath"], defer_size=1024)
+    safe_fields = ["Modality", "StudyDescription", "SeriesDescription", "Manufacturer", "ManufacturerModelName", "Rows", "Columns", "BitsAllocated", "NumberOfFrames", "PhotometricInterpretation", "SOPClassUID", "TransferSyntaxUID"]
+    metadata = {}
+    for field in safe_fields:
+        value = getattr(dataset, field, None)
+        if value not in (None, ""):
+            metadata[field] = str(value)
+    return {"studyId": study_id, "metadata": metadata, "sourceSHA256": study["hashes"]["input"], "pixelDataPresent": "PixelData" in dataset}
+
+
+@app.get("/api/studies/{study_id}/integrity")
+def verify_study_integrity(study_id: str):
+    if study_id not in STUDIES:
+        raise HTTPException(404, "Study not found")
+    study = STUDIES[study_id]
+    with open(study["rawFilePath"], "rb") as handle:
+        input_actual = sha256_bytes(handle.read())
+    output_actual = ""
+    if os.path.exists(study["sandboxedFilePath"]):
+        with open(study["sandboxedFilePath"], "rb") as handle:
+            output_actual = sha256_bytes(handle.read())
+    input_match = input_actual == study["hashes"]["input"]
+    output_match = bool(output_actual) and output_actual == study["hashes"]["output"]
+    merkle_match = bool(output_actual) and merkle_hash(input_actual, output_actual) == study["hashes"]["merkle"]
+    result = {
+        "studyId": study_id, "inputHashMatch": input_match, "outputHashMatch": output_match,
+        "merkleMatch": merkle_match, "auditEvents": len(AUDIT.get_chain(study_id, 1000)),
+        "status": "VERIFIED" if input_match and output_match and merkle_match else "MISMATCH",
+    }
+    AUDIT.append(study_id, "INTEGRITY", f"Evidence integrity verification: {result['status']}")
+    return result
+
+
+@app.patch("/api/studies/{study_id}/case")
+def update_case(study_id: str, payload: dict = Body(...)):
+    if study_id not in STUDIES:
+        raise HTTPException(404, "Study not found")
+    study = STUDIES[study_id]
+    ensure_case_data(study)
+    case = study["case"]
+    if "priority" in payload:
+        priority = str(payload["priority"]).upper()
+        if priority not in CASE_PRIORITIES:
+            raise HTTPException(400, "Unsupported priority")
+        case["priority"] = priority
+    if "owner" in payload:
+        owner = str(payload["owner"]).strip()
+        if len(owner) > 80:
+            raise HTTPException(400, "Owner must be 80 characters or fewer")
+        case["owner"] = owner
+    if "dueDate" in payload:
+        due_date = str(payload["dueDate"]).strip()
+        if due_date:
+            try:
+                datetime.strptime(due_date, "%Y-%m-%d")
+            except ValueError as exc:
+                raise HTTPException(400, "Due date must use YYYY-MM-DD") from exc
+        case["dueDate"] = due_date
+    if "tags" in payload:
+        if not isinstance(payload["tags"], list):
+            raise HTTPException(400, "Tags must be a list")
+        tags = [str(tag).strip().lower() for tag in payload["tags"] if str(tag).strip()]
+        if len(tags) > 8 or any(len(tag) > 32 for tag in tags):
+            raise HTTPException(400, "Use up to 8 tags of 32 characters or fewer")
+        case["tags"] = list(dict.fromkeys(tags))
+    AUDIT.append(study_id, "CASE-UPDATE", "Case triage details updated")
+    persist_study(study)
+    return case
 
 
 # ─── DISCOVERY ────────────────────────────────────────────────────────────────

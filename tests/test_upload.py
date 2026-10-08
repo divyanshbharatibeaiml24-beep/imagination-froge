@@ -76,6 +76,45 @@ class UploadWorkflowTest(unittest.TestCase):
         certificate = self.client.get(f"/api/studies/{study_id}/certificate").json()
         self.assertEqual(certificate["policyId"], "HIPAA_SAFE_HARBOR_EXT")
 
+    def test_batch_case_management_metadata_and_integrity(self):
+        source = backend.STUDIES["ST-44821-CHEST-DX"]["rawFilePath"]
+        with open(source, "rb") as first, open(source, "rb") as second:
+            response = self.client.post(
+                "/api/studies/batch-upload",
+                files=[
+                    ("files", ("first-study.dcm", first, "application/dicom")),
+                    ("files", ("second-study.dcm", second, "application/dicom")),
+                ],
+            )
+        self.assertEqual(response.status_code, 201)
+        payload = response.json()
+        self.assertEqual(payload["acceptedCount"], 2)
+        study_id = payload["accepted"][0]["studyId"]
+        record = backend.STUDIES[study_id]
+        self.created_paths.extend([record["rawFilePath"], record["sandboxedFilePath"]])
+        for accepted in payload["accepted"][1:]:
+            extra = backend.STUDIES[accepted["studyId"]]
+            self.created_paths.extend([extra["rawFilePath"], extra["sandboxedFilePath"]])
+
+        case = self.client.patch(
+            f"/api/studies/{study_id}/case",
+            json={"priority": "urgent", "owner": "privacy.ops", "dueDate": "2027-01-31", "tags": ["research", "priority"]},
+        )
+        self.assertEqual(case.status_code, 200)
+        self.assertEqual(case.json()["priority"], "URGENT")
+        self.assertEqual(case.json()["tags"], ["research", "priority"])
+        self.assertEqual(self.client.patch(f"/api/studies/{study_id}/case", json={"tags": "invalid"}).status_code, 400)
+        self.assertEqual(self.client.get(f"/api/studies/{study_id}/metadata").status_code, 200)
+
+        self.assertEqual(self.client.post(f"/api/studies/{study_id}/discover").status_code, 200)
+        self.assertEqual(self.client.post(f"/api/studies/{study_id}/transform").status_code, 200)
+        integrity = self.client.get(f"/api/studies/{study_id}/integrity")
+        self.assertEqual(integrity.status_code, 200)
+        self.assertEqual(integrity.json()["status"], "VERIFIED")
+
+        filtered = self.client.get("/api/studies", params={"priority": "URGENT", "q": "privacy.ops"}).json()
+        self.assertTrue(any(study["id"] == study_id for study in filtered))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,16 +1,15 @@
 const state = {
-  mode: 'upload', file: null, studies: [], policies: [], selectedStudyId: null,
+  mode: 'upload', files: [], studies: [], policies: [], selectedStudyId: null,
   running: false, viewMode: 'original', slice: 1
 };
 const $ = (id) => document.getElementById(id);
 const elements = {
   uploadTab: $('uploadTab'), demoTab: $('demoTab'), uploadPanel: $('uploadPanel'), demoPanel: $('demoPanel'),
-  fileInput: $('fileInput'), dropZone: $('dropZone'), fileSelection: $('fileSelection'), fileName: $('fileName'),
-  fileMeta: $('fileMeta'), removeFile: $('removeFile'), demoSelect: $('demoSelect'), policySelect: $('policySelect'),
-  reviewMode: $('reviewMode'), selectionSummary: $('selectionSummary'), runButton: $('runButton'),
-  progressCard: $('progressCard'), progressTitle: $('progressTitle'), progressPercent: $('progressPercent'),
-  progressBar: $('progressBar'), pipelineSteps: $('pipelineSteps'), results: $('resultsSection'), toast: $('toast'),
-  worklist: $('worklist'), sliceRange: $('sliceRange'), sliceValue: $('sliceValue'), reviewPanel: $('reviewPanel')
+  fileInput: $('fileInput'), dropZone: $('dropZone'), fileSelection: $('fileSelection'), fileName: $('fileName'), fileMeta: $('fileMeta'),
+  removeFile: $('removeFile'), demoSelect: $('demoSelect'), policySelect: $('policySelect'), reviewMode: $('reviewMode'),
+  selectionSummary: $('selectionSummary'), runButton: $('runButton'), progressCard: $('progressCard'), progressTitle: $('progressTitle'),
+  progressPercent: $('progressPercent'), progressBar: $('progressBar'), pipelineSteps: $('pipelineSteps'), results: $('resultsSection'),
+  toast: $('toast'), worklist: $('worklist'), sliceRange: $('sliceRange'), sliceValue: $('sliceValue'), reviewPanel: $('reviewPanel')
 };
 
 async function api(url, options = {}) {
@@ -50,20 +49,26 @@ function setMode(mode) {
 function updateSelection() {
   const dot = document.querySelector('.summary-dot');
   const study = state.studies.find((item) => item.id === elements.demoSelect.value);
-  const ready = state.mode === 'upload' ? Boolean(state.file) : Boolean(study);
-  elements.selectionSummary.textContent = state.mode === 'upload'
-    ? (ready ? `${state.file.name} is ready to ingest` : 'Select a DICOM file to continue')
-    : (study ? `${study.modality} · ${study.studyDesc}` : 'Choose a demo study');
+  const ready = state.mode === 'upload' ? state.files.length > 0 : Boolean(study);
+  if (state.mode === 'upload') {
+    elements.selectionSummary.textContent = ready
+      ? `${state.files.length} DICOM ${state.files.length === 1 ? 'file' : 'files'} ready for intake`
+      : 'Select one or more DICOM files to continue';
+  } else {
+    elements.selectionSummary.textContent = study ? `${study.modality} · ${study.studyDesc}` : 'Choose a demo study';
+  }
   elements.runButton.disabled = !ready || state.running;
   dot.classList.toggle('ready', ready);
 }
 
-function chooseFile(file) {
-  if (!file) return;
-  if (file.size > 50 * 1024 * 1024) return showToast('The file must be 50 MB or smaller.', true);
-  state.file = file;
-  elements.fileName.textContent = file.name;
-  elements.fileMeta.textContent = `${(file.size / 1024 / 1024).toFixed(2)} MB · DICOM input`;
+function chooseFiles(fileList) {
+  const files = [...fileList];
+  if (!files.length) return;
+  if (files.length > 10) return showToast('Select no more than 10 DICOM files at a time.', true);
+  if (files.some((file) => file.size > 50 * 1024 * 1024)) return showToast('Each file must be 50 MB or smaller.', true);
+  state.files = files;
+  elements.fileName.textContent = files.length === 1 ? files[0].name : `${files[0].name} and ${files.length - 1} more`;
+  elements.fileMeta.textContent = `${files.length} DICOM file${files.length === 1 ? '' : 's'} · ${(files.reduce((sum, file) => sum + file.size, 0) / 1024 / 1024).toFixed(2)} MB total`;
   elements.fileSelection.classList.remove('hidden');
   updateSelection();
 }
@@ -99,13 +104,26 @@ function renderOperations(metrics) {
   $('operationsMetrics').innerHTML = cards.map(([label, value]) => `<div class="metric"><span>${label}</span><strong class="${label === 'Attack leaks' && value === 0 ? 'good' : ''}">${value}</strong></div>`).join('');
 }
 
+function filteredStudies() {
+  const needle = $('worklistSearch').value.trim().toLowerCase();
+  const releaseState = $('worklistState').value;
+  const priority = $('worklistPriority').value;
+  return state.studies.filter((study) => {
+    const caseData = study.case || {};
+    const fields = [study.id, study.modality, study.studyDesc, caseData.owner, ...(caseData.tags || [])].join(' ').toLowerCase();
+    return (!needle || fields.includes(needle)) && (!releaseState || study.releaseState === releaseState) && (!priority || caseData.priority === priority);
+  });
+}
+
 function renderWorklist() {
-  const recent = state.studies.slice(-8).reverse();
-  $('worklistCount').textContent = `${state.studies.length} studies`;
-  elements.worklist.innerHTML = recent.map((study) => `
-    <button class="worklist-item ${study.id === state.selectedStudyId ? 'active' : ''}" type="button" data-study-id="${escapeHtml(study.id)}">
-      <strong>${escapeHtml(study.modality)} · ${escapeHtml(study.id)}</strong><span>${escapeHtml(study.studyDesc)}</span><small>${escapeHtml(study.releaseState || 'Ready')}</small>
-    </button>`).join('');
+  const studies = filteredStudies().slice().reverse();
+  $('worklistCount').textContent = `${studies.length} case${studies.length === 1 ? '' : 's'}`;
+  elements.worklist.innerHTML = studies.length ? studies.map((study) => {
+    const caseData = study.case || {};
+    return `<button class="worklist-item ${study.id === state.selectedStudyId ? 'active' : ''}" type="button" data-study-id="${escapeHtml(study.id)}">
+      <strong>${escapeHtml(study.modality)} · ${escapeHtml(study.id)}</strong><span>${escapeHtml(study.studyDesc)}</span><small>${escapeHtml(caseData.priority || 'NORMAL')} · ${escapeHtml(study.releaseState || 'Ready')}${caseData.owner ? ` · ${escapeHtml(caseData.owner)}` : ''}</small>
+    </button>`;
+  }).join('') : '<div class="empty-worklist">No cases match the current filters.</div>';
   elements.worklist.querySelectorAll('[data-study-id]').forEach((button) => button.addEventListener('click', () => openStudy(button.dataset.studyId)));
 }
 
@@ -130,39 +148,37 @@ function setProgress(index, title) {
   });
 }
 
-async function uploadSelectedFile() {
-  setProgress(0, 'Securely ingesting DICOM');
+async function uploadSelectedFiles() {
+  setProgress(0, 'Securely ingesting DICOM input');
   const form = new FormData();
-  form.append('file', state.file);
-  return (await api('/api/studies/upload', { method: 'POST', body: form })).studyId;
+  state.files.forEach((file) => form.append('files', file));
+  const result = await api('/api/studies/batch-upload', { method: 'POST', body: form });
+  if (!result.accepted.length) throw new Error(result.rejected[0]?.reason || 'No files were accepted');
+  if (result.rejected.length) showToast(`${result.rejected.length} file(s) were rejected during intake.`, true);
+  return result.accepted.map((item) => item.studyId);
 }
 
 async function runPipeline() {
   if (state.running) return;
+  if (state.mode === 'upload' && state.files.length > 1 && elements.reviewMode.value === 'manual') {
+    showToast('Batch processing requires automated review. Use one file for manual review.', true);
+    return;
+  }
   state.running = true;
   elements.runButton.disabled = true;
   elements.progressCard.classList.remove('hidden');
   elements.results.classList.add('hidden');
   elements.progressCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
   try {
-    const studyId = state.mode === 'upload' ? await uploadSelectedFile() : elements.demoSelect.value;
-    state.selectedStudyId = studyId;
-    setProgress(1, 'Discovering identifiers across eight planes');
-    await api(`/api/studies/${encodeURIComponent(studyId)}/discover`, { method: 'POST' });
-    setProgress(2, 'Applying the selected policy');
-    await api(`/api/studies/${encodeURIComponent(studyId)}/transform`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ policyId: elements.policySelect.value })
-    });
-    if (elements.reviewMode.value === 'manual') {
-      const reviewState = await api(`/api/studies/${encodeURIComponent(studyId)}`);
-      if (reviewState.reviewPendingCount > 0) {
-        setProgress(3, 'Waiting for analyst review');
-        await finishRun(studyId, 'Analyst review required before release');
-        return;
-      }
+    const studyIds = state.mode === 'upload' ? await uploadSelectedFiles() : [elements.demoSelect.value];
+    let manualReviewPending = false;
+    for (let index = 0; index < studyIds.length; index += 1) {
+      const result = await processStudy(studyIds[index], studyIds.length > 1 ? true : elements.reviewMode.value === 'manual', index + 1, studyIds.length);
+      manualReviewPending ||= result.manualReviewPending;
+      if (manualReviewPending) break;
     }
-    await completeValidation(studyId);
-    await finishRun(studyId, 'Processing complete');
+    const lastStudyId = studyIds[manualReviewPending ? 0 : studyIds.length - 1];
+    await finishRun(lastStudyId, manualReviewPending ? 'Analyst review required before release' : `${studyIds.length} case${studyIds.length === 1 ? '' : 's'} processed successfully`);
   } catch (error) {
     elements.progressCard.classList.add('hidden');
     showToast(error.message, true);
@@ -172,13 +188,31 @@ async function runPipeline() {
   }
 }
 
-async function completeValidation(studyId) {
+async function processStudy(studyId, autoReview, index, total) {
+  state.selectedStudyId = studyId;
+  const prefix = total > 1 ? `Case ${index} of ${total}: ` : '';
+  setProgress(1, `${prefix}discovering identifiers`);
+  await api(`/api/studies/${encodeURIComponent(studyId)}/discover`, { method: 'POST' });
+  setProgress(2, `${prefix}applying the selected policy`);
+  await api(`/api/studies/${encodeURIComponent(studyId)}/transform`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ policyId: elements.policySelect.value })
+  });
+  const reviewState = await api(`/api/studies/${encodeURIComponent(studyId)}`);
+  if (!autoReview && reviewState.reviewPendingCount > 0) {
+    setProgress(3, 'Waiting for analyst review');
+    return { manualReviewPending: true };
+  }
+  await completeValidation(studyId, prefix);
+  return { manualReviewPending: false };
+}
+
+async function completeValidation(studyId, prefix = '') {
   await api(`/api/studies/${encodeURIComponent(studyId)}/review/action`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bulk: true, action: 'approve' })
   });
-  setProgress(3, 'Running independent three-truth validation');
+  setProgress(3, `${prefix}running independent validation`);
   await api(`/api/studies/${encodeURIComponent(studyId)}/validate`, { method: 'POST' });
-  setProgress(4, 'Running adversarial privacy probes');
+  setProgress(4, `${prefix}running adversarial privacy probes`);
   await api(`/api/studies/${encodeURIComponent(studyId)}/attack`, { method: 'POST' });
   setProgress(5, 'Processing complete');
 }
@@ -213,7 +247,6 @@ async function renderResults(study) {
   elements.sliceRange.max = Math.max(1, study.instanceCount || 1);
   elements.sliceRange.value = state.slice;
   setViewerMode('original');
-
   const findings = study.findings || [];
   $('findingsBody').innerHTML = findings.length ? findings.slice(0, 12).map((finding) => `
     <tr><td>${escapeHtml(finding.loc)}</td><td>${escapeHtml(finding.type)}</td><td class="action-tag">${escapeHtml(finding.action)}</td><td class="status-check">✓ Protected</td></tr>`
@@ -233,7 +266,10 @@ async function renderResults(study) {
   renderReviewQueue(study);
   renderMetadata(study);
   renderNotes(study.notes || []);
-  await Promise.all([loadAudit(study.id), loadDossier(study.id)]);
+  renderCase(study.case || {});
+  $('integrityResult').className = 'integrity-result';
+  $('integrityResult').textContent = 'Integrity has not been checked in this session.';
+  await Promise.all([loadAudit(study.id), loadDossier(study.id), loadTechnicalMetadata(study.id)]);
 }
 
 function renderReviewQueue(study) {
@@ -251,17 +287,20 @@ function renderMetadata(study) {
   $('metadataList').innerHTML = metadata.map(([label, value]) => `<div class="metadata-row"><span>${escapeHtml(label)}</span><span>${escapeHtml(value)}</span></div>`).join('');
 }
 
+function renderCase(caseData) {
+  $('casePriority').value = caseData.priority || 'NORMAL';
+  $('caseOwner').value = caseData.owner || '';
+  $('caseDueDate').value = caseData.dueDate || '';
+  $('caseTags').value = (caseData.tags || []).join(', ');
+}
+
 function renderNotes(notes) {
-  $('noteList').innerHTML = notes.length
-    ? notes.slice().reverse().map((note) => `<li>${escapeHtml(note.text)}</li>`).join('')
-    : '<li>No analyst notes.</li>';
+  $('noteList').innerHTML = notes.length ? notes.slice().reverse().map((note) => `<li>${escapeHtml(note.text)}</li>`).join('') : '<li>No analyst notes.</li>';
 }
 
 async function approveFinding(itemId) {
   try {
-    await api(`/api/studies/${encodeURIComponent(state.selectedStudyId)}/review/action`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ itemId, action: 'approve' })
-    });
+    await api(`/api/studies/${encodeURIComponent(state.selectedStudyId)}/review/action`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ itemId, action: 'approve' }) });
     await renderResults(await api(`/api/studies/${encodeURIComponent(state.selectedStudyId)}`));
   } catch (error) { showToast(error.message, true); }
 }
@@ -296,9 +335,7 @@ async function loadAudit(studyId) {
   try {
     const audit = await api(`/api/audit?study_id=${encodeURIComponent(studyId)}&last_n=4`);
     $('auditHead').textContent = audit.chainHead.slice(0, 12);
-    $('auditList').innerHTML = audit.entries.length
-      ? audit.entries.slice().reverse().map((entry) => `<li>${escapeHtml(entry.step)} — ${escapeHtml(entry.detail)}</li>`).join('')
-      : '<li>No recorded events.</li>';
+    $('auditList').innerHTML = audit.entries.length ? audit.entries.slice().reverse().map((entry) => `<li>${escapeHtml(entry.step)} — ${escapeHtml(entry.detail)}</li>`).join('') : '<li>No recorded events.</li>';
   } catch (_) { $('auditList').innerHTML = '<li>Audit history unavailable.</li>'; }
 }
 
@@ -308,11 +345,40 @@ async function loadDossier(studyId) {
     $('riskScore').textContent = dossier.riskScore;
     $('riskBand').textContent = `${dossier.riskBand} risk`;
     $('riskDetail').textContent = `${dossier.lifecycle.pendingReview} pending review · ${dossier.notesCount} analyst note(s)`;
-  } catch (_) {
-    $('riskScore').textContent = '—';
-    $('riskBand').textContent = 'Risk unavailable';
-    $('riskDetail').textContent = 'Dossier service did not respond';
-  }
+  } catch (_) { $('riskScore').textContent = '—'; $('riskBand').textContent = 'Risk unavailable'; $('riskDetail').textContent = 'Dossier service did not respond'; }
+}
+
+async function loadTechnicalMetadata(studyId) {
+  try {
+    const result = await api(`/api/studies/${encodeURIComponent(studyId)}/metadata`);
+    $('technicalMetadata').innerHTML = Object.entries(result.metadata).map(([key, value]) => `<div class="metadata-row"><span>${escapeHtml(key)}</span><span>${escapeHtml(value)}</span></div>`).join('');
+  } catch (_) { $('technicalMetadata').textContent = 'Metadata unavailable.'; }
+}
+
+async function verifyIntegrity() {
+  if (!state.selectedStudyId) return;
+  try {
+    const result = await api(`/api/studies/${encodeURIComponent(state.selectedStudyId)}/integrity`);
+    const verified = result.status === 'VERIFIED';
+    $('integrityResult').className = `integrity-result ${verified ? 'verified' : 'mismatch'}`;
+    $('integrityResult').textContent = verified
+      ? `Verified: source, output, and Merkle evidence match (${result.auditEvents} audit events).`
+      : 'Evidence mismatch detected. Keep this case quarantined and investigate the audit history.';
+    await loadAudit(state.selectedStudyId);
+  } catch (error) { showToast(error.message, true); }
+}
+
+async function saveCase() {
+  if (!state.selectedStudyId) return;
+  const tags = $('caseTags').value.split(',').map((tag) => tag.trim()).filter(Boolean);
+  try {
+    await api(`/api/studies/${encodeURIComponent(state.selectedStudyId)}/case`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ priority: $('casePriority').value, owner: $('caseOwner').value, dueDate: $('caseDueDate').value, tags })
+    });
+    await renderResults(await api(`/api/studies/${encodeURIComponent(state.selectedStudyId)}`));
+    await loadStudies();
+    showToast('Case management details saved');
+  } catch (error) { showToast(error.message, true); }
 }
 
 async function downloadCertificate() {
@@ -333,9 +399,7 @@ async function saveNote() {
   const note = $('caseNote').value.trim();
   if (!note || !state.selectedStudyId) return;
   try {
-    await api(`/api/studies/${encodeURIComponent(state.selectedStudyId)}/notes`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ note })
-    });
+    await api(`/api/studies/${encodeURIComponent(state.selectedStudyId)}/notes`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ note }) });
     $('caseNote').value = '';
     await renderResults(await api(`/api/studies/${encodeURIComponent(state.selectedStudyId)}`));
     showToast('Analyst note saved');
@@ -345,21 +409,22 @@ async function saveNote() {
 elements.uploadTab.addEventListener('click', () => setMode('upload'));
 elements.demoTab.addEventListener('click', () => setMode('demo'));
 elements.dropZone.addEventListener('click', () => elements.fileInput.click());
-elements.fileInput.addEventListener('change', () => chooseFile(elements.fileInput.files[0]));
-elements.removeFile.addEventListener('click', () => { state.file = null; elements.fileInput.value = ''; elements.fileSelection.classList.add('hidden'); updateSelection(); });
+elements.fileInput.addEventListener('change', () => chooseFiles(elements.fileInput.files));
+elements.removeFile.addEventListener('click', () => { state.files = []; elements.fileInput.value = ''; elements.fileSelection.classList.add('hidden'); updateSelection(); });
 ['dragenter', 'dragover'].forEach((name) => elements.dropZone.addEventListener(name, (event) => { event.preventDefault(); elements.dropZone.classList.add('dragging'); }));
 ['dragleave', 'drop'].forEach((name) => elements.dropZone.addEventListener(name, (event) => { event.preventDefault(); elements.dropZone.classList.remove('dragging'); }));
-elements.dropZone.addEventListener('drop', (event) => chooseFile(event.dataTransfer.files[0]));
+elements.dropZone.addEventListener('drop', (event) => chooseFiles(event.dataTransfer.files));
 elements.demoSelect.addEventListener('change', updateSelection);
 elements.runButton.addEventListener('click', runPipeline);
 $('approveAllButton').addEventListener('click', approveAllAndContinue);
 $('downloadCertificate').addEventListener('click', downloadCertificate);
+$('verifyIntegrity').addEventListener('click', verifyIntegrity);
+$('saveCase').addEventListener('click', saveCase);
 $('saveNote').addEventListener('click', saveNote);
 elements.sliceRange.addEventListener('input', () => { state.slice = Number(elements.sliceRange.value); updateViewer(); });
 document.querySelectorAll('[data-view]').forEach((button) => button.addEventListener('click', () => setViewerMode(button.dataset.view)));
+['worklistSearch', 'worklistState', 'worklistPriority'].forEach((id) => $(id).addEventListener(id === 'worklistSearch' ? 'input' : 'change', renderWorklist));
 $('refreshButton').addEventListener('click', loadStudies);
-document.querySelectorAll('[data-scroll]').forEach((button) => button.addEventListener('click', () => {
-  const target = $(button.dataset.scroll); if (target && !target.classList.contains('hidden')) target.scrollIntoView({ behavior: 'smooth' });
-}));
+document.querySelectorAll('[data-scroll]').forEach((button) => button.addEventListener('click', () => { const target = $(button.dataset.scroll); if (target && !target.classList.contains('hidden')) target.scrollIntoView({ behavior: 'smooth' }); }));
 
 loadStudies();
